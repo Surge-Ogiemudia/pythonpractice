@@ -1,46 +1,52 @@
-export interface TestCase {
-  input: string;
-  expectedOutput: string;
-  description: string;
-}
-
+// A problem set pasted in by the student
 export interface Problem {
-  id: string;
   title: string;
-  week: string;
   filename: string;
-  description: string;
-  requirements: string[];
-  expectedEdgeCases: string[];
-  hints: string[];
-  testCases: TestCase[];
-  defaultAtomicSteps: string[];
+  text: string;
 }
 
 export interface AtomicTask {
   id: string;
   title: string;
   description: string;
-  codeHint?: string;
-  samplePattern?: string;
+  // Spaces this step's first line starts at in the final program
+  indent: number;
 }
 
 export interface Stage1Response {
   allClear: boolean;
   feedback: string;
-  missingCases: string[];
+  missingPoints: string[];
+  orderIssues: string[];
+  // The full solution plan in the order the code runs, in plain English
+  correctOrder: string[];
   atomicTasks: AtomicTask[];
+}
+
+export interface Stage1State {
+  attempts: number;
+  previousText: string;
+  result: Stage1Response | null;
 }
 
 export interface Stage2Card {
   id: string;
   taskTitle: string;
   taskDescription: string;
+  indent: number;
   userCode: string;
   isCorrect: boolean;
   feedback: string;
   hint: string;
   attempts: number;
+}
+
+export interface Stage3Review {
+  isCorrect: boolean;
+  feedback: string;
+  issues: string[];
+  betterVersion: string;
+  betterExplanation: string;
 }
 
 export interface LintError {
@@ -49,15 +55,6 @@ export interface LintError {
   severity: "error" | "warning";
   line?: number;
   fixHint?: string;
-}
-
-export interface TestResult {
-  testIndex: number;
-  input: string;
-  expected: string;
-  actual: string;
-  passed: boolean;
-  error?: string;
 }
 
 export interface UserSettings {

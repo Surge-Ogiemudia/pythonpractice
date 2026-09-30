@@ -2,17 +2,20 @@
 
 import React, { useState } from "react";
 import { Problem, AtomicTask, Stage2Card } from "@/types";
-import { 
-  Code2, 
-  CheckCircle2, 
-  AlertCircle, 
-  ArrowRight, 
-  Sparkles, 
-  Loader2, 
-  HelpCircle,
+import { callTutor } from "@/lib/api";
+import {
+  Code2,
+  CheckCircle2,
+  AlertCircle,
+  ArrowRight,
+  Sparkles,
+  Loader2,
   Lightbulb,
   CornerDownLeft,
-  Flame
+  Flame,
+  Lock,
+  Pencil,
+  FileCode,
 } from "lucide-react";
 
 interface Stage2AtomicMappingProps {
@@ -20,8 +23,54 @@ interface Stage2AtomicMappingProps {
   atomicTasks: AtomicTask[];
   cards: Stage2Card[];
   setCards: React.Dispatch<React.SetStateAction<Stage2Card[]>>;
-  onProceedToAssembly: (compiledSnippets: string) => void;
+  onProceedToAssembly: (program: string) => void;
   apiKey: string;
+  model: string;
+}
+
+// Trim blank lines around a snippet but keep its leading indentation
+export function cleanSnippet(code: string): string {
+  return code.replace(/^(\s*\n)+/, "").replace(/\s+$/, "");
+}
+
+export function joinSnippets(codes: string[]): string {
+  return codes.map(cleanSnippet).filter(Boolean).join("\n");
+}
+
+export function cardsFromTasks(tasks: AtomicTask[]): Stage2Card[] {
+  return tasks.map((task, i) => ({
+    id: task.id || `step-${i + 1}`,
+    taskTitle: task.title,
+    taskDescription: task.description,
+    indent: task.indent ?? 0,
+    userCode: "",
+    isCorrect: false,
+    feedback: "",
+    hint: "",
+    attempts: 0,
+  }));
+}
+
+// Editor-like keys for a plain textarea: Tab indents 4 spaces, Enter keeps indentation
+function handleCodeKeys(e: React.KeyboardEvent<HTMLTextAreaElement>, onChange: (value: string) => void) {
+  const el = e.currentTarget;
+  const { selectionStart: start, selectionEnd: end, value } = el;
+
+  let insert: string | null = null;
+  if (e.key === "Tab" && !e.shiftKey) {
+    insert = "    ";
+  } else if (e.key === "Enter" && !e.metaKey && !e.ctrlKey) {
+    const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+    const line = value.slice(lineStart, start);
+    const indent = line.match(/^ */)?.[0] ?? "";
+    insert = "\n" + indent + (line.trimEnd().endsWith(":") ? "    " : "");
+  }
+  if (insert === null) return;
+
+  // setRangeText moves the caret in the same tick, so fast typing can't land in the wrong place
+  e.preventDefault();
+  el.setRangeText(insert, start, end, "end");
+  onChange(el.value);
 }
 
 export const Stage2AtomicMapping: React.FC<Stage2AtomicMappingProps> = ({
@@ -31,287 +80,265 @@ export const Stage2AtomicMapping: React.FC<Stage2AtomicMappingProps> = ({
   setCards,
   onProceedToAssembly,
   apiKey,
+  model,
 }) => {
-  const [activeCardIndex, setActiveCardIndex] = useState(0);
-  const [loadingIndex, setLoadingIndex] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  // Initialize cards if empty
+  // Initialize cards from the Stage 1 steps
   React.useEffect(() => {
     if (cards.length === 0 && atomicTasks.length > 0) {
-      const initialCards: Stage2Card[] = atomicTasks.map((task) => ({
-        id: task.id,
-        taskTitle: task.title,
-        taskDescription: task.description,
-        userCode: "",
-        isCorrect: false,
-        feedback: "",
-        hint: "",
-        attempts: 0,
-      }));
-      setCards(initialCards);
+      setCards(cardsFromTasks(atomicTasks));
     }
   }, [atomicTasks, cards.length, setCards]);
 
-  const handleCodeChange = (index: number, value: string) => {
-    setCards((prev) => {
-      const copy = [...prev];
-      copy[index] = { ...copy[index], userCode: value };
-      return copy;
-    });
+  // Steps are done strictly in order: the active step is the first unapproved one
+  const firstOpen = cards.findIndex((c) => !c.isCorrect);
+  const activeIndex = firstOpen === -1 ? cards.length : firstOpen;
+  const active = cards[activeIndex];
+  const allApproved = cards.length > 0 && firstOpen === -1;
+
+  const approvedCode = joinSnippets(cards.slice(0, activeIndex).map((c) => c.userCode));
+
+  const updateCard = (index: number, patch: Partial<Stage2Card>) => {
+    setCards((prev) => prev.map((c, i) => (i === index ? { ...c, ...patch } : c)));
   };
 
-  const handleValidateCard = async (index: number) => {
-    const card = cards[index];
-    if (!card.userCode.trim()) return;
+  // Reopening a step also reopens every step after it, since they build on it
+  const reopenFrom = (index: number) => {
+    setCards((prev) =>
+      prev.map((c, i) => (i >= index ? { ...c, isCorrect: false, feedback: "", hint: "" } : c))
+    );
+  };
 
-    setLoadingIndex(index);
+  const handleValidate = async () => {
+    if (!active || !active.userCode.trim()) return;
+    setLoading(true);
+    const index = activeIndex;
     try {
-      const response = await fetch("/api/ai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "validate-stage2",
-          problemId: problem.id,
-          stepIndex: index,
-          userCode: card.userCode,
-          apiKey,
-        }),
+      const data = await callTutor<{ isCorrect: boolean; feedback: string; hint: string }>({
+        action: "stage2",
+        problemText: problem.text,
+        steps: cards.map((c) => ({ title: c.taskTitle, description: c.taskDescription, indent: c.indent })),
+        stepIndex: index,
+        codeSoFar: approvedCode,
+        userCode: cleanSnippet(active.userCode),
+        apiKey,
+        model,
       });
-
-      if (!response.ok) {
-        throw new Error("Failed to validate atomic line");
-      }
-
-      const data = await response.json();
-      setCards((prev) => {
-        const copy = [...prev];
-        copy[index] = {
-          ...copy[index],
-          isCorrect: data.isCorrect,
-          feedback: data.feedback,
-          hint: data.hint || "",
-          attempts: copy[index].attempts + 1,
-        };
-        return copy;
+      updateCard(index, {
+        isCorrect: Boolean(data.isCorrect),
+        feedback: data.feedback,
+        hint: data.hint || "",
+        attempts: active.attempts + 1,
       });
-
-      // Auto advance to next unsolved card if correct
-      if (data.isCorrect && index < cards.length - 1) {
-        setActiveCardIndex(index + 1);
-      }
-    } catch (err: any) {
-      setCards((prev) => {
-        const copy = [...prev];
-        copy[index] = {
-          ...copy[index],
-          feedback: err.message || "Could not validate snippet.",
-          isCorrect: false,
-        };
-        return copy;
+    } catch (err: unknown) {
+      updateCard(index, {
+        isCorrect: false,
+        feedback: err instanceof Error ? err.message : "Could not reach the tutor.",
+        hint: "",
       });
     } finally {
-      setLoadingIndex(null);
+      setLoading(false);
     }
   };
 
-  const allCardsApproved = cards.length > 0 && cards.every((c) => c.isCorrect);
-
-  const handleBuildAssembly = () => {
-    // Generate initial assembly code from all validated user snippets
-    const snippets = cards.map((c) => c.userCode).join("\n\n");
-    onProceedToAssembly(snippets);
-  };
-
-  const handleLoadSampleLines = () => {
-    if (problem.id === "fuel") {
-      const sampleLines = [
-        `fraction = input("Fraction: ")`,
-        `parts = fraction.split("/")\nx = int(parts[0])\ny = int(parts[1])`,
-        `if x > y or x < 0 or y <= 0:\n    continue`,
-        `percentage = round((x / y) * 100)`,
-        `if percentage <= 1:\n    print("E")\nelif percentage >= 99:\n    print("F")\nelse:\n    print(f"{percentage}%")`,
-      ];
-
-      setCards((prev) =>
-        prev.map((c, idx) => ({
-          ...c,
-          userCode: sampleLines[idx] || c.userCode,
-          isCorrect: true,
-          feedback: "Verified pattern matches CS50 requirements.",
-          hint: "",
-        }))
-      );
+  // The whole file as it stands: approved steps, the step being written, then what's left
+  const previewLines: { text: string; kind: "done" | "current" | "todo" }[] = [];
+  cards.forEach((card, i) => {
+    if (i < activeIndex) {
+      cleanSnippet(card.userCode)
+        .split("\n")
+        .forEach((text) => previewLines.push({ text, kind: "done" }));
+    } else if (i === activeIndex) {
+      const draft = cleanSnippet(card.userCode);
+      const lines = draft ? draft.split("\n") : [" ".repeat(card.indent) + `# step ${i + 1} goes here`];
+      lines.forEach((text) => previewLines.push({ text, kind: "current" }));
+    } else {
+      previewLines.push({ text: " ".repeat(card.indent) + `# step ${i + 1}: ${card.taskTitle}`, kind: "todo" });
     }
-  };
+  });
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
-        <div>
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-semibold mb-3">
-            <Code2 className="w-3.5 h-3.5" />
-            <span>Stage 2: Atomic Syntax Mapping</span>
-          </div>
-          <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-            Write Isolated Python Snippets
-          </h1>
-          <p className="text-neutral-400 text-sm mt-1 max-w-2xl">
-            Don’t worry about `while` loops, indentation, or error handlers yet. Focus purely on writing the 1–2 lines of code that perform each isolated task.
-          </p>
+    <div className="max-w-7xl mx-auto px-4 py-8">
+      <div className="mb-8">
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-semibold mb-3">
+          <Code2 className="w-3.5 h-3.5" />
+          <span>Stage 2: Write It Step by Step</span>
         </div>
-
-        <button
-          onClick={handleLoadSampleLines}
-          className="text-xs text-neutral-400 hover:text-rose-400 transition-colors underline self-start sm:self-center"
-        >
-          Auto-fill sample snippets
-        </button>
+        <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">Build {problem.filename} from the top down</h1>
+        <p className="text-neutral-400 text-sm mt-1 max-w-3xl">
+          Each step is the next few lines of the file, in order, with the indentation they will have in the finished
+          program. When every step is approved, your steps stacked together are the program.
+        </p>
       </div>
 
-      {/* Progress tracker */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-8">
-        {cards.map((card, idx) => (
-          <button
-            key={card.id}
-            onClick={() => setActiveCardIndex(idx)}
-            className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-              activeCardIndex === idx
-                ? "bg-rose-500/15 border-rose-500/50 shadow-md"
-                : card.isCorrect
-                ? "bg-emerald-950/20 border-emerald-500/30 text-emerald-300"
-                : "bg-neutral-900 border-neutral-800 text-neutral-400 hover:border-neutral-700"
-            }`}
-          >
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-mono font-bold">Step {idx + 1}</span>
-              {card.isCorrect ? (
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              ) : (
-                <span className="w-2 h-2 rounded-full bg-neutral-700" />
-              )}
-            </div>
-            <p className="text-[11px] truncate text-neutral-300">{card.taskDescription}</p>
-          </button>
-        ))}
-      </div>
-
-      {/* Active Card Workspace */}
-      {cards[activeCardIndex] && (
-        <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
-          <div className="flex items-start justify-between gap-4 mb-6">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2">
-                <span className="px-2.5 py-0.5 rounded-md bg-neutral-800 text-rose-400 font-mono text-xs font-bold">
-                  Step {activeCardIndex + 1} of {cards.length}
-                </span>
-                {cards[activeCardIndex].isCorrect && (
-                  <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-xs font-medium flex items-center gap-1">
-                    <CheckCircle2 className="w-3 h-3" /> Validated
-                  </span>
-                )}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Step list + active step */}
+        <div className="lg:col-span-7 space-y-4">
+          <div className="flex flex-wrap gap-2">
+            {cards.map((card, idx) => (
+              <div
+                key={card.id}
+                title={card.taskTitle}
+                className={`px-3 py-1.5 rounded-lg border text-xs font-mono font-bold flex items-center gap-1.5 ${
+                  idx === activeIndex
+                    ? "bg-rose-500/15 border-rose-500/50 text-rose-300"
+                    : card.isCorrect
+                    ? "bg-emerald-950/20 border-emerald-500/30 text-emerald-300"
+                    : "bg-neutral-900 border-neutral-800 text-neutral-500"
+                }`}
+              >
+                {card.isCorrect ? (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                ) : idx > activeIndex ? (
+                  <Lock className="w-3 h-3" />
+                ) : null}
+                <span>{idx + 1}</span>
               </div>
-              <h2 className="text-lg sm:text-xl font-bold text-white pt-2">
-                {cards[activeCardIndex].taskDescription}
-              </h2>
-            </div>
+            ))}
           </div>
 
-          {/* Code Input Box */}
-          <div className="space-y-3">
-            <label className="block text-xs font-semibold text-neutral-400 uppercase tracking-wider">
-              Your Python Line(s)
-            </label>
-            <div className="relative">
+          {active && (
+            <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6">
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <span className="px-2.5 py-0.5 rounded-md bg-neutral-800 text-rose-400 font-mono text-xs font-bold">
+                  Step {activeIndex + 1} of {cards.length}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-md bg-neutral-800 text-neutral-400 font-mono text-xs">
+                  starts at {active.indent} spaces
+                </span>
+              </div>
+              <h2 className="text-lg font-bold text-white">{active.taskTitle}</h2>
+              <p className="text-sm text-neutral-300 mt-1">{active.taskDescription}</p>
+
               <textarea
-                rows={3}
-                value={cards[activeCardIndex].userCode}
-                onChange={(e) => handleCodeChange(activeCardIndex, e.target.value)}
-                placeholder="Write your line of Python code here..."
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-4 text-sm font-mono text-emerald-400 focus:outline-none focus:border-rose-500 leading-relaxed resize-y custom-scrollbar"
+                rows={5}
+                value={active.userCode}
+                onChange={(e) => updateCard(activeIndex, { userCode: e.target.value })}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                    handleValidateCard(activeCardIndex);
+                    e.preventDefault();
+                    handleValidate();
+                    return;
                   }
+                  handleCodeKeys(e, (v) => updateCard(activeIndex, { userCode: v }));
                 }}
+                spellCheck={false}
+                placeholder={" ".repeat(active.indent) + "# your line(s) here, indented as in the final file"}
+                className="mt-4 w-full bg-neutral-950 border border-neutral-800 rounded-xl p-4 text-sm font-mono text-emerald-400 focus:outline-none focus:border-rose-500 leading-relaxed resize-y custom-scrollbar whitespace-pre"
               />
-            </div>
 
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
-              <span className="text-xs text-neutral-500 flex items-center gap-1 font-mono">
-                <CornerDownLeft className="w-3 h-3" /> Tip: Ctrl + Enter to quickly check line
-              </span>
-
-              <button
-                onClick={() => handleValidateCard(activeCardIndex)}
-                disabled={loadingIndex === activeCardIndex || !cards[activeCardIndex].userCode.trim()}
-                className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-sm font-semibold transition-all flex items-center justify-center gap-2 shadow-lg shadow-rose-600/20 cursor-pointer"
-              >
-                {loadingIndex === activeCardIndex ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Verifying Line...</span>
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="w-4 h-4" />
-                    <span>Check Line</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Feedback & Hint Box */}
-          {cards[activeCardIndex].feedback && (
-            <div
-              className={`mt-6 p-4 rounded-xl border transition-all ${
-                cards[activeCardIndex].isCorrect
-                  ? "bg-emerald-950/20 border-emerald-500/30 text-emerald-300"
-                  : "bg-amber-950/20 border-amber-500/30 text-amber-300"
-              }`}
-            >
-              <div className="flex items-start gap-3">
-                {cards[activeCardIndex].isCorrect ? (
-                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-                ) : (
-                  <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-                )}
-                <div className="space-y-1">
-                  <p className="text-sm font-medium">{cards[activeCardIndex].feedback}</p>
-                  {cards[activeCardIndex].hint && (
-                    <p className="text-xs text-amber-400/90 flex items-center gap-1.5 pt-1">
-                      <Lightbulb className="w-3.5 h-3.5 shrink-0" />
-                      <span>{cards[activeCardIndex].hint}</span>
-                    </p>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3">
+                <span className="text-xs text-neutral-500 flex items-center gap-1 font-mono">
+                  <CornerDownLeft className="w-3 h-3" /> Tab = 4 spaces · Ctrl + Enter to check
+                </span>
+                <button
+                  onClick={handleValidate}
+                  disabled={loading || !active.userCode.trim()}
+                  className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-sm font-semibold transition-all flex items-center justify-center gap-2 shadow-lg shadow-rose-600/20 cursor-pointer"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Checking...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4" />
+                      <span>Check step</span>
+                    </>
                   )}
-                </div>
+                </button>
               </div>
+
+              {active.feedback && (
+                <div className="mt-5 p-4 rounded-xl border bg-amber-950/20 border-amber-500/30 text-amber-300">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium break-words">{active.feedback}</p>
+                      {active.hint && (
+                        <p className="text-xs text-amber-400/90 flex items-start gap-1.5 pt-1">
+                          <Lightbulb className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <span>{active.hint}</span>
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
-        </div>
-      )}
 
-      {/* Complete Banner to Stage 3 */}
-      {allCardsApproved && (
-        <div className="mt-8 bg-linear-to-r from-emerald-950/40 via-neutral-900 to-emerald-950/40 border border-emerald-500/50 rounded-2xl p-6 sm:p-8 flex flex-col sm:flex-row items-center justify-between gap-6 shadow-2xl">
+          {/* Approved steps, newest first, with the tutor's note */}
+          {cards
+            .map((card, idx) => ({ card, idx }))
+            .filter(({ card }) => card.isCorrect)
+            .reverse()
+            .map(({ card, idx }) => (
+              <div key={card.id} className="bg-emerald-950/10 border border-emerald-500/20 rounded-xl p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Step {idx + 1}: {card.taskTitle}
+                  </span>
+                  <button
+                    onClick={() => reopenFrom(idx)}
+                    className="text-[11px] text-neutral-400 hover:text-rose-400 flex items-center gap-1 cursor-pointer"
+                    title="Edit this step (steps after it will need re-checking)"
+                  >
+                    <Pencil className="w-3 h-3" /> Edit
+                  </button>
+                </div>
+                <p className="text-xs text-neutral-400 mt-1">{card.feedback}</p>
+              </div>
+            ))}
+        </div>
+
+        {/* The file as it will be assembled */}
+        <div className="lg:col-span-5 lg:sticky lg:top-24">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden">
+            <div className="bg-neutral-950 px-4 py-2.5 border-b border-neutral-800 flex items-center gap-2 text-xs font-mono text-neutral-400">
+              <FileCode className="w-3.5 h-3.5 text-rose-400" />
+              <span>{problem.filename}: your program so far</span>
+            </div>
+            <div className="p-4 font-mono text-xs leading-relaxed overflow-x-auto max-h-[32rem] overflow-y-auto custom-scrollbar">
+              {previewLines.map((line, i) => (
+                <div key={i} className="flex">
+                  <span className="w-8 shrink-0 text-right pr-3 text-neutral-600 select-none">{i + 1}</span>
+                  <pre
+                    className={`whitespace-pre ${
+                      line.kind === "done"
+                        ? "text-neutral-200"
+                        : line.kind === "current"
+                        ? "text-rose-300 bg-rose-500/10 w-full"
+                        : "text-neutral-600 italic"
+                    }`}
+                  >
+                    {line.text || " "}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {allApproved && (
+        <div className="mt-8 bg-linear-to-r from-emerald-950/40 via-neutral-900 to-emerald-950/40 border border-emerald-500/50 rounded-2xl p-6 sm:p-8 flex flex-col sm:flex-row items-center justify-between gap-6">
           <div className="flex items-center gap-4">
             <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
               <Flame className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="text-lg font-bold text-white">All Atomic Snippets Verified!</h3>
-              <p className="text-neutral-400 text-sm">
-                You’ve created the building blocks. Now bring them together into the Assembly Canvas.
-              </p>
+              <h3 className="text-lg font-bold text-white">Every step approved</h3>
+              <p className="text-neutral-400 text-sm">Your steps, stacked in order, are the whole program. Time to run it.</p>
             </div>
           </div>
-
           <button
-            onClick={handleBuildAssembly}
-            className="w-full sm:w-auto px-6 py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-xl shadow-emerald-600/30 cursor-pointer"
+            onClick={() => onProceedToAssembly(joinSnippets(cards.map((c) => c.userCode)))}
+            className="w-full sm:w-auto px-6 py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
           >
-            <span>Proceed to Stage 3: Assembly Canvas</span>
+            <span>Go to Stage 3: Run &amp; review</span>
             <ArrowRight className="w-4 h-4" />
           </button>
         </div>

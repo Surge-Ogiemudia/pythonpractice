@@ -1,130 +1,214 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { CS50_PROBLEMS } from "@/data/problems";
-import { Problem, AtomicTask, Stage2Card } from "@/types";
+import React, { useState, useEffect, useCallback } from "react";
+import { Problem, AtomicTask, Stage1State, Stage2Card, Stage3Review, UserSettings } from "@/types";
 import { Navbar } from "@/components/Navbar";
-import { SettingsModal } from "@/components/SettingsModal";
+import { SettingsModal, DEFAULT_MODEL } from "@/components/SettingsModal";
+import { ProblemSetup } from "@/components/ProblemSetup";
 import { Stage1Comprehension } from "@/components/Stage1Comprehension";
 import { Stage2AtomicMapping } from "@/components/Stage2AtomicMapping";
 import { Stage3Assembly } from "@/components/Stage3Assembly";
 
+type Stage = 1 | 2 | 3;
+
+interface Session {
+  problem: Problem | null;
+  currentStage: Stage;
+  completedStages: { 1: boolean; 2: boolean; 3: boolean };
+  userText: string;
+  stage1: Stage1State;
+  atomicTasks: AtomicTask[];
+  stage2Cards: Stage2Card[];
+  stage2Code: string;
+  code: string;
+  review: Stage3Review | null;
+}
+
+const EMPTY_SESSION: Session = {
+  problem: null,
+  currentStage: 1,
+  completedStages: { 1: false, 2: false, 3: false },
+  userText: "",
+  stage1: { attempts: 0, previousText: "", result: null },
+  atomicTasks: [],
+  stage2Cards: [],
+  stage2Code: "",
+  code: "",
+  review: null,
+};
+
+const SESSION_KEY = "cs50_tutor_session";
+const SETTINGS_KEY = "cs50_tutor_settings";
+
+// localStorage can throw (private mode, blocked storage), so progress saving is best-effort
+function load<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function save(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // ignore
+  }
+}
+
 export default function Home() {
-  const [currentProblem, setCurrentProblem] = useState<Problem>(CS50_PROBLEMS[0]);
-  const [currentStage, setCurrentStage] = useState<1 | 2 | 3>(1);
-  const [completedStages, setCompletedStages] = useState<{ 1: boolean; 2: boolean; 3: boolean }>({
-    1: false,
-    2: false,
-    3: false,
+  const [session, setSession] = useState<Session>(EMPTY_SESSION);
+  const [settings, setSettings] = useState<UserSettings>({
+    geminiApiKey: "",
+    model: DEFAULT_MODEL,
   });
-
-  // Stage 1 State
-  const [userText, setUserText] = useState<string>("");
-  const [atomicTasks, setAtomicTasks] = useState<AtomicTask[]>([]);
-
-  // Stage 2 State
-  const [stage2Cards, setStage2Cards] = useState<Stage2Card[]>([]);
-
-  // Stage 3 State
-  const [assembledCode, setAssembledCode] = useState<string>("");
-
-  // Settings & Gemini API key
-  const [apiKey, setApiKey] = useState<string>("");
+  const [loaded, setLoaded] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  // Load API key from localStorage on mount
+  // Restore saved progress and settings after mount (localStorage isn't available during SSR)
   useEffect(() => {
-    const saved = localStorage.getItem("cs50_gemini_key");
-    if (saved) setApiKey(saved);
+    const savedSession = load<Session>(SESSION_KEY);
+    const savedSettings = load<UserSettings>(SETTINGS_KEY);
+    /* eslint-disable react-hooks/set-state-in-effect */
+    if (savedSession) setSession({ ...EMPTY_SESSION, ...savedSession });
+    if (savedSettings)
+      setSettings({
+        geminiApiKey: savedSettings.geminiApiKey || "",
+        model: savedSettings.model || DEFAULT_MODEL,
+      });
+    setLoaded(true);
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
-  const handleSaveKey = (key: string) => {
-    setApiKey(key);
-    localStorage.setItem("cs50_gemini_key", key);
+  useEffect(() => {
+    if (loaded) save(SESSION_KEY, session);
+  }, [session, loaded]);
+
+  const update = useCallback((patch: Partial<Session>) => setSession((prev) => ({ ...prev, ...patch })), []);
+
+  const handleSaveSettings = (next: UserSettings) => {
+    setSettings(next);
+    save(SETTINGS_KEY, next);
   };
 
-  // Reset states when changing problem
-  const handleSelectProblem = (problem: Problem) => {
-    setCurrentProblem(problem);
-    setCurrentStage(1);
-    setCompletedStages({ 1: false, 2: false, 3: false });
-    setUserText("");
-    setAtomicTasks([]);
-    setStage2Cards([]);
-    setAssembledCode("");
+  const handleStart = (problem: Problem) => setSession({ ...EMPTY_SESSION, problem });
+
+  const handleNewProblem = () => {
+    if (window.confirm("Start a new problem? Your progress on this one will be cleared.")) {
+      setSession(EMPTY_SESSION);
+    }
   };
 
-  // When Stage 1 is cleared
-  const handleStage1Approved = (tasks: AtomicTask[]) => {
-    setAtomicTasks(tasks);
-    setCompletedStages((prev) => ({ ...prev, 1: true }));
-    setCurrentStage(2);
-  };
+  // Revisiting Stage 1 after passing it just moves on, keeping Stage 2 work
+  const handleStage1Approved = (tasks: AtomicTask[]) =>
+    setSession((prev) =>
+      prev.completedStages[1]
+        ? { ...prev, currentStage: 2 }
+        : {
+            ...prev,
+            atomicTasks: tasks,
+            stage2Cards: [],
+            completedStages: { ...prev.completedStages, 1: true },
+            currentStage: 2,
+          },
+    );
 
-  // When Stage 2 is cleared
-  const handleStage2ProceedToAssembly = (compiledSnippets: string) => {
-    setAssembledCode(compiledSnippets);
-    setCompletedStages((prev) => ({ ...prev, 2: true }));
-    setCurrentStage(3);
-  };
+  const handleStage2Done = (program: string) =>
+    setSession((prev) => ({
+      ...prev,
+      stage2Code: program,
+      code: program,
+      review: null,
+      completedStages: { ...prev.completedStages, 2: true },
+      currentStage: 3,
+    }));
 
-  const handleStage3Completed = () => {
-    setCompletedStages((prev) => ({ ...prev, 3: true }));
-  };
+  const setStage2Cards: React.Dispatch<React.SetStateAction<Stage2Card[]>> = useCallback(
+    (action) =>
+      setSession((prev) => ({
+        ...prev,
+        stage2Cards: typeof action === "function" ? action(prev.stage2Cards) : action,
+      })),
+    [],
+  );
+
+  const setCode = useCallback((code: string) => update({ code }), [update]);
+
+  const { problem, currentStage } = session;
+  const hasApiKey = Boolean(settings.geminiApiKey);
+  const aiProps = { apiKey: settings.geminiApiKey, model: settings.model };
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col selection:bg-rose-500 selection:text-white">
-      {/* Top Navigation */}
       <Navbar
-        currentProblem={currentProblem}
-        onSelectProblem={handleSelectProblem}
+        problem={problem}
+        onNewProblem={handleNewProblem}
         currentStage={currentStage}
-        onSelectStage={(stage) => setCurrentStage(stage)}
-        completedStages={completedStages}
+        onSelectStage={(stage) => update({ currentStage: stage })}
+        completedStages={session.completedStages}
         onOpenSettings={() => setIsSettingsOpen(true)}
-        hasApiKey={Boolean(apiKey)}
+        hasApiKey={hasApiKey}
       />
 
-      {/* Main Stage Workspace */}
       <main className="flex-1 pb-16">
-        {currentStage === 1 && (
-          <Stage1Comprehension
-            problem={currentProblem}
-            userText={userText}
-            setUserText={setUserText}
-            onApprove={handleStage1Approved}
-            apiKey={apiKey}
-          />
-        )}
+        {!loaded ? null : !problem ? (
+          <ProblemSetup onStart={handleStart} hasApiKey={hasApiKey} onOpenSettings={() => setIsSettingsOpen(true)} />
+        ) : (
+          <>
+            {currentStage === 1 && (
+              <Stage1Comprehension
+                problem={problem}
+                userText={session.userText}
+                setUserText={(userText) => update({ userText })}
+                state={session.stage1}
+                setState={(stage1) => update({ stage1 })}
+                onApprove={handleStage1Approved}
+                {...aiProps}
+              />
+            )}
 
-        {currentStage === 2 && (
-          <Stage2AtomicMapping
-            problem={currentProblem}
-            atomicTasks={atomicTasks.length > 0 ? atomicTasks : currentProblem.defaultAtomicSteps.map((s, i) => ({ id: `step-${i+1}`, title: `Step ${i+1}`, description: s }))}
-            cards={stage2Cards}
-            setCards={setStage2Cards}
-            onProceedToAssembly={handleStage2ProceedToAssembly}
-            apiKey={apiKey}
-          />
-        )}
+            {currentStage === 2 && (
+              <Stage2AtomicMapping
+                problem={problem}
+                atomicTasks={session.atomicTasks}
+                cards={session.stage2Cards}
+                setCards={setStage2Cards}
+                onProceedToAssembly={handleStage2Done}
+                {...aiProps}
+              />
+            )}
 
-        {currentStage === 3 && (
-          <Stage3Assembly
-            problem={currentProblem}
-            initialCode={assembledCode}
-            onCodeChange={setAssembledCode}
-            onCompleteStage={handleStage3Completed}
-          />
+            {currentStage === 3 && (
+              <Stage3Assembly
+                problem={problem}
+                code={session.code}
+                onCodeChange={setCode}
+                stage2Code={session.stage2Code}
+                review={session.review}
+                setReview={(review) => update({ review })}
+                onCompleteStage={() =>
+                  setSession((prev) => ({
+                    ...prev,
+                    completedStages: { ...prev.completedStages, 3: true },
+                  }))
+                }
+                {...aiProps}
+              />
+            )}
+          </>
         )}
       </main>
 
-      {/* Settings Modal */}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        onSaveKey={handleSaveKey}
-        currentKey={apiKey}
-      />
+      {isSettingsOpen && (
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          onSave={handleSaveSettings}
+          current={settings}
+        />
+      )}
     </div>
   );
 }

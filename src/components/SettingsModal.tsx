@@ -1,32 +1,32 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { X, Key, Check, AlertCircle, Sparkles, ExternalLink } from "lucide-react";
+import React, { useState } from "react";
+import { X, Key, Check, ExternalLink } from "lucide-react";
+import { UserSettings } from "@/types";
+
+export const DEFAULT_MODEL = "gemini-flash-latest";
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSaveKey: (key: string) => void;
-  currentKey: string;
+  onSave: (settings: UserSettings) => void;
+  current: UserSettings;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
-  onSaveKey,
-  currentKey,
+  onSave,
+  current,
 }) => {
-  const [apiKey, setApiKey] = useState(currentKey);
+  const [apiKey, setApiKey] = useState(current.geminiApiKey);
+  const [model, setModel] = useState(current.model);
   const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    setApiKey(currentKey);
-  }, [currentKey]);
 
   if (!isOpen) return null;
 
   const handleSave = () => {
-    onSaveKey(apiKey.trim());
+    onSave({ geminiApiKey: apiKey.trim(), model: model.trim() || DEFAULT_MODEL });
     setSaved(true);
     setTimeout(() => {
       setSaved(false);
@@ -50,7 +50,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
           <div>
             <h2 className="text-lg font-bold text-white">AI Coach Settings</h2>
-            <p className="text-xs text-neutral-400">Connect Google Gemini for adaptive feedback</p>
+            <p className="text-xs text-neutral-400">The tutor runs on Google Gemini</p>
           </div>
         </div>
 
@@ -79,18 +79,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </p>
           </div>
 
-          <div className="bg-neutral-950/60 border border-neutral-800/80 rounded-xl p-3 text-xs text-neutral-400 space-y-2">
-            <div className="flex items-center gap-2 text-rose-400 font-semibold">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Smart Offline Scaffolding Included</span>
-            </div>
-            <p>
-              Even without an API key, the tutor includes intelligent built-in evaluators for standard CS50 problem sets (Fuel Gauge, Taqueria, Coke, etc.).
-            </p>
-            <p>
-              Adding your key enables full conversational reasoning on custom problems and deeper syntax explanations!
+          <div>
+            <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-2">
+              Model
+            </label>
+            <input
+              type="text"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder={DEFAULT_MODEL}
+              className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-2.5 text-sm text-neutral-200 focus:outline-none focus:border-rose-500 font-mono"
+            />
+            <p className="text-xs text-neutral-500 mt-2">
+              {DEFAULT_MODEL} always points to Google&apos;s newest Flash model. Change it only if Google retires that name.
             </p>
           </div>
+
+          <p className="text-xs text-neutral-500">
+            Your key is saved only in this browser and sent to Gemini through this app&apos;s server.
+          </p>
 
           <div className="flex gap-3 pt-2">
             <button
@@ -109,7 +116,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <span>Saved!</span>
                 </>
               ) : (
-                <span>Save Key</span>
+                <span>Save</span>
               )}
             </button>
           </div>
