@@ -8,6 +8,8 @@ A study tool for CS50's Introduction to Programming with Python. Paste in any pr
 
 Use `check50` in your CS50 codespace for the official grade.
 
+**[Try it live](https://pythonpractice-gules.vercel.app)**
+
 ## Running it
 
 ```bash
@@ -18,3 +20,5 @@ npm run dev
 Open http://localhost:3000, click **Connect AI Key** and paste a free Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey). The key is saved in your browser. You can also set `GEMINI_API_KEY` (and optionally `GEMINI_MODEL`) in `.env.local` instead.
 
 Progress is saved in the browser, so a refresh won't lose your place. **New** in the top bar starts a fresh problem.
+
+Built with Next.js, TypeScript and Pyodide.
